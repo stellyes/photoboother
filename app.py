@@ -111,16 +111,42 @@ def has_aws_secrets() -> bool:
         return False
 
 
+def get_aws_config() -> dict:
+    """Get AWS configuration from secrets or environment."""
+    import os
+
+    if has_aws_secrets():
+        return {
+            'table_name': st.secrets.aws.get("table_name", "PhotoStorageApp"),
+            'bucket_name': st.secrets.aws.get("s3_bucket", None),
+            'region_name': st.secrets.aws.get("region", "us-west-1"),
+            'aws_access_key_id': st.secrets.aws.access_key_id,
+            'aws_secret_access_key': st.secrets.aws.secret_access_key
+        }
+    else:
+        return {
+            'table_name': os.environ.get('DYNAMODB_TABLE', 'PhotoStorageApp'),
+            'bucket_name': os.environ.get('S3_BUCKET', None),
+            'region_name': os.environ.get('AWS_REGION', 'us-west-1'),
+            'aws_access_key_id': os.environ.get('AWS_ACCESS_KEY_ID'),
+            'aws_secret_access_key': os.environ.get('AWS_SECRET_ACCESS_KEY')
+        }
+
+
 def connect_database():
-    """Connect to DynamoDB or use local storage."""
-    # Auto-connect using secrets if available and not yet connected
-    if has_aws_secrets() and not st.session_state.db_connected:
+    """Connect to DynamoDB + S3 or use local storage."""
+    # Auto-connect using secrets/env vars if available and not yet connected
+    config = get_aws_config()
+    has_credentials = config['aws_access_key_id'] and config['aws_secret_access_key']
+
+    if has_credentials and not st.session_state.db_connected:
         try:
             db = PhotoDatabase(
-                table_name=st.secrets.aws.get("table_name", "PhotoStorageApp"),
-                region_name=st.secrets.aws.get("region", "us-east-1"),
-                aws_access_key_id=st.secrets.aws.access_key_id,
-                aws_secret_access_key=st.secrets.aws.secret_access_key
+                table_name=config['table_name'],
+                bucket_name=config['bucket_name'],
+                region_name=config['region_name'],
+                aws_access_key_id=config['aws_access_key_id'],
+                aws_secret_access_key=config['aws_secret_access_key']
             )
             db.create_table_if_not_exists()
             st.session_state.db = db
@@ -131,9 +157,12 @@ def connect_database():
             st.sidebar.error(f"Auto-connect failed: {str(e)}")
 
     with st.sidebar.expander("⚙️ Database Settings", expanded=not st.session_state.db_connected):
-        # Show connection status if using secrets
-        if has_aws_secrets() and st.session_state.db_connected and not st.session_state.use_local_storage:
-            st.success("Connected via secrets.toml")
+        # Show connection status if using AWS
+        if has_credentials and st.session_state.db_connected and not st.session_state.use_local_storage:
+            st.success("Connected to AWS (DynamoDB + S3)")
+            if st.session_state.db:
+                st.caption(f"Table: {st.session_state.db.table_name}")
+                st.caption(f"Bucket: {st.session_state.db.bucket_name}")
             if st.button("Disconnect"):
                 st.session_state.db = None
                 st.session_state.db_connected = False
@@ -143,26 +172,25 @@ def connect_database():
 
         storage_type = st.radio(
             "Storage Type",
-            ["Local (Demo Mode)", "AWS DynamoDB"],
+            ["Local (Demo Mode)", "AWS (DynamoDB + S3)"],
             index=0 if st.session_state.use_local_storage else 1
         )
 
-        if storage_type == "AWS DynamoDB":
+        if storage_type == "AWS (DynamoDB + S3)":
             st.session_state.use_local_storage = False
 
-            # Use secrets as defaults if available
-            default_region = st.secrets.aws.get("region", "us-east-1") if has_aws_secrets() else "us-east-1"
-            default_table = st.secrets.aws.get("table_name", "PhotoStorageApp") if has_aws_secrets() else "PhotoStorageApp"
-
-            aws_region = st.text_input("AWS Region", value=default_region)
+            # Use config as defaults
+            aws_region = st.text_input("AWS Region", value=config['region_name'])
             aws_access_key = st.text_input("AWS Access Key ID", type="password")
             aws_secret_key = st.text_input("AWS Secret Access Key", type="password")
-            table_name = st.text_input("Table Name", value=default_table)
+            table_name = st.text_input("DynamoDB Table", value=config['table_name'])
+            bucket_name = st.text_input("S3 Bucket (optional)", value=config['bucket_name'] or "")
 
-            if st.button("Connect to DynamoDB"):
+            if st.button("Connect to AWS"):
                 try:
                     db = PhotoDatabase(
                         table_name=table_name,
+                        bucket_name=bucket_name if bucket_name else None,
                         region_name=aws_region,
                         aws_access_key_id=aws_access_key if aws_access_key else None,
                         aws_secret_access_key=aws_secret_key if aws_secret_key else None
@@ -171,7 +199,7 @@ def connect_database():
                     st.session_state.db = db
                     st.session_state.db_connected = True
                     st.session_state.photos = db.get_all_photos()
-                    st.success("Connected to DynamoDB!")
+                    st.success("Connected to AWS!")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Connection failed: {str(e)}")
