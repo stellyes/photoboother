@@ -99,23 +99,66 @@ def init_session_state():
         st.session_state.use_local_storage = True
 
 
+def has_aws_secrets() -> bool:
+    """Check if AWS secrets are configured."""
+    try:
+        return (
+            "aws" in st.secrets
+            and st.secrets.aws.get("access_key_id")
+            and st.secrets.aws.get("secret_access_key")
+        )
+    except Exception:
+        return False
+
+
 def connect_database():
     """Connect to DynamoDB or use local storage."""
+    # Auto-connect using secrets if available and not yet connected
+    if has_aws_secrets() and not st.session_state.db_connected:
+        try:
+            db = PhotoDatabase(
+                table_name=st.secrets.aws.get("table_name", "PhotoStorageApp"),
+                region_name=st.secrets.aws.get("region", "us-east-1"),
+                aws_access_key_id=st.secrets.aws.access_key_id,
+                aws_secret_access_key=st.secrets.aws.secret_access_key
+            )
+            db.create_table_if_not_exists()
+            st.session_state.db = db
+            st.session_state.db_connected = True
+            st.session_state.use_local_storage = False
+            st.session_state.photos = db.get_all_photos()
+        except Exception as e:
+            st.sidebar.error(f"Auto-connect failed: {str(e)}")
+
     with st.sidebar.expander("⚙️ Database Settings", expanded=not st.session_state.db_connected):
+        # Show connection status if using secrets
+        if has_aws_secrets() and st.session_state.db_connected and not st.session_state.use_local_storage:
+            st.success("Connected via secrets.toml")
+            if st.button("Disconnect"):
+                st.session_state.db = None
+                st.session_state.db_connected = False
+                st.session_state.photos = []
+                st.rerun()
+            return
+
         storage_type = st.radio(
             "Storage Type",
             ["Local (Demo Mode)", "AWS DynamoDB"],
             index=0 if st.session_state.use_local_storage else 1
         )
-        
+
         if storage_type == "AWS DynamoDB":
             st.session_state.use_local_storage = False
-            
-            aws_region = st.text_input("AWS Region", value="us-east-1")
+
+            # Use secrets as defaults if available
+            default_region = st.secrets.aws.get("region", "us-east-1") if has_aws_secrets() else "us-east-1"
+            default_table = st.secrets.aws.get("table_name", "PhotoStorageApp") if has_aws_secrets() else "PhotoStorageApp"
+
+            aws_region = st.text_input("AWS Region", value=default_region)
             aws_access_key = st.text_input("AWS Access Key ID", type="password")
             aws_secret_key = st.text_input("AWS Secret Access Key", type="password")
-            table_name = st.text_input("Table Name", value="PhotoStorageApp")
-            
+            table_name = st.text_input("Table Name", value=default_table)
+
             if st.button("Connect to DynamoDB"):
                 try:
                     db = PhotoDatabase(
@@ -128,14 +171,14 @@ def connect_database():
                     st.session_state.db = db
                     st.session_state.db_connected = True
                     st.session_state.photos = db.get_all_photos()
-                    st.success("✅ Connected to DynamoDB!")
+                    st.success("Connected to DynamoDB!")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Connection failed: {str(e)}")
         else:
             st.session_state.use_local_storage = True
-            st.info("📁 Using local demo mode (photos stored in session)")
-            
+            st.info("Using local demo mode (photos stored in session)")
+
             if not st.session_state.db_connected:
                 st.session_state.db_connected = True
                 if 'local_photos' not in st.session_state:
