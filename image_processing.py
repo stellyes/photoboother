@@ -9,6 +9,8 @@ import io
 import base64
 from typing import Tuple, Optional, List
 
+from scanner import EdgeDetector, PerspectiveTransformer
+
 
 def base64_to_cv2(base64_string: str) -> np.ndarray:
     """Convert base64 string to OpenCV image."""
@@ -190,176 +192,57 @@ def auto_crop_photo(
 ) -> Tuple[Optional[bytes], bool]:
     """
     Automatically crop a photo from a high-contrast background.
-    
-    This function detects a photo (like a photo strip or printed photo)
-    against a contrasting background and extracts just the photo.
-    
+
+    Uses the EdgeDetector from python-photo-scanner for robust multi-method
+    boundary detection including Canny, adaptive threshold, color segmentation,
+    saturation-based detection, and GrabCut.
+
     Args:
         image_bytes: Raw image bytes
         min_area_ratio: Minimum contour area as ratio of image area
         padding: Padding to add around detected photo
-        
+
     Returns:
         Tuple of (cropped image bytes or None, whether crop was applied)
     """
     # Load image
     nparr = np.frombuffer(image_bytes, np.uint8)
     image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    
+
     if image is None:
         return None, False
-    
+
     original = image.copy()
     height, width = image.shape[:2]
     image_area = height * width
-    
-    # Convert to different color spaces for analysis
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-    l_channel = lab[:, :, 0]
-    
-    # Apply Gaussian blur
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    l_blurred = cv2.GaussianBlur(l_channel, (5, 5), 0)
-    
-    best_result = None
-    best_score = 0
-    
-    # Determine if background is dark or light by sampling corners
-    corner_size = min(50, height // 10, width // 10)
-    corners = [
-        gray[0:corner_size, 0:corner_size].mean(),
-        gray[0:corner_size, -corner_size:].mean(),
-        gray[-corner_size:, 0:corner_size].mean(),
-        gray[-corner_size:, -corner_size:].mean()
-    ]
-    avg_corner_brightness = np.mean(corners)
-    dark_background = avg_corner_brightness < 127
-    
-    # Method: Multiple threshold values with aggressive morphology
-    for thresh_val in [60, 80, 100, 120, 140, 160, 180]:
-        _, thresh = cv2.threshold(l_blurred, thresh_val, 255, cv2.THRESH_BINARY)
-        
-        # Fill holes aggressively - the photo content may have dark areas
-        kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 21))
-        kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-        
-        # Close to fill holes, then open to remove small noise
-        filled = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel_close, iterations=3)
-        filled = cv2.morphologyEx(filled, cv2.MORPH_OPEN, kernel_open, iterations=2)
-        
-        # Find contours
-        contours, _ = cv2.findContours(filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            
-            # Skip if too small or too large
-            if area < image_area * min_area_ratio or area > image_area * 0.92:
-                continue
-            
-            # Get minimum area rectangle
-            rect = cv2.minAreaRect(contour)
-            box = cv2.boxPoints(rect)
-            rect_w, rect_h = rect[1]
-            
-            if rect_w == 0 or rect_h == 0:
-                continue
-            
-            rect_area = rect_w * rect_h
-            
-            # Calculate how rectangular the contour is
-            # Higher is better (1.0 = perfect rectangle)
-            rectangularity = area / rect_area if rect_area > 0 else 0
-            
-            # Calculate aspect ratio (we want reasonable ratios)
-            aspect = max(rect_w, rect_h) / min(rect_w, rect_h)
-            
-            # Score based on rectangularity and area
-            # Prefer larger, more rectangular contours
-            # But also prefer contours away from image edges
-            
-            # Check if contour touches image edges (likely background)
-            x, y, w, h = cv2.boundingRect(contour)
-            edge_margin = 20
-            touches_edge = (x < edge_margin or y < edge_margin or 
-                          x + w > width - edge_margin or y + h > height - edge_margin)
-            
-            # Calculate score
-            area_ratio = area / image_area
-            score = rectangularity * area_ratio
-            
-            # Penalize if too close to full image size or touching edges
-            if area_ratio > 0.85:
-                score *= 0.5
-            if touches_edge and area_ratio > 0.7:
-                score *= 0.7
-            
-            # Accept if rectangularity is reasonable (lower threshold since photos have content)
-            if rectangularity > 0.45 and aspect < 10 and score > best_score:
-                best_score = score
-                best_result = np.array(box, dtype=np.float32)
-    
-    # Also try with inverted threshold for light backgrounds
-    if best_result is None or best_score < 0.1:
-        for thresh_val in [60, 80, 100, 120, 140, 160, 180]:
-            _, thresh = cv2.threshold(l_blurred, thresh_val, 255, cv2.THRESH_BINARY_INV)
-            
-            kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 21))
-            kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-            
-            filled = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel_close, iterations=3)
-            filled = cv2.morphologyEx(filled, cv2.MORPH_OPEN, kernel_open, iterations=2)
-            
-            contours, _ = cv2.findContours(filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
-            for contour in contours:
-                area = cv2.contourArea(contour)
-                
-                if area < image_area * min_area_ratio or area > image_area * 0.92:
-                    continue
-                
-                rect = cv2.minAreaRect(contour)
-                box = cv2.boxPoints(rect)
-                rect_w, rect_h = rect[1]
-                
-                if rect_w == 0 or rect_h == 0:
-                    continue
-                
-                rect_area = rect_w * rect_h
-                rectangularity = area / rect_area if rect_area > 0 else 0
-                aspect = max(rect_w, rect_h) / min(rect_w, rect_h)
-                
-                x, y, w, h = cv2.boundingRect(contour)
-                edge_margin = 20
-                touches_edge = (x < edge_margin or y < edge_margin or 
-                              x + w > width - edge_margin or y + h > height - edge_margin)
-                
-                area_ratio = area / image_area
-                score = rectangularity * area_ratio
-                
-                if area_ratio > 0.85:
-                    score *= 0.5
-                if touches_edge and area_ratio > 0.7:
-                    score *= 0.7
-                
-                if rectangularity > 0.45 and aspect < 10 and score > best_score:
-                    best_score = score
-                    best_result = np.array(box, dtype=np.float32)
-    
-    # Apply perspective transform if we found a good result
-    if best_result is not None and best_score > 0.05:
-        cropped_image = four_point_transform(original, best_result)
-        
-        # Verify the crop is meaningfully different from original
-        crop_h, crop_w = cropped_image.shape[:2]
-        crop_area = crop_h * crop_w
-        
-        if crop_area < image_area * 0.90:  # At least 10% smaller
-            _, buffer = cv2.imencode('.jpg', cropped_image, [cv2.IMWRITE_JPEG_QUALITY, 95])
-            return buffer.tobytes(), True
-    
-    # Return original if no meaningful crop detected
+
+    # Use EdgeDetector from python-photo-scanner for robust detection
+    detector = EdgeDetector(
+        min_area_ratio=min_area_ratio,
+        max_area_ratio=0.95,
+        contour_epsilon=0.02
+    )
+
+    # Detect photo boundary using multiple methods
+    boundary = detector.detect(image)
+
+    if boundary is None:
+        # No boundary detected, return original
+        return image_bytes, False
+
+    # Use PerspectiveTransformer for the perspective correction
+    transformer = PerspectiveTransformer()
+    cropped_image = transformer.transform(original, boundary)
+
+    # Verify the crop is meaningfully different from original
+    crop_h, crop_w = cropped_image.shape[:2]
+    crop_area = crop_h * crop_w
+
+    if crop_area < image_area * 0.90:  # At least 10% smaller
+        _, buffer = cv2.imencode('.jpg', cropped_image, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        return buffer.tobytes(), True
+
+    # Return original if crop isn't significantly different
     return image_bytes, False
 
 

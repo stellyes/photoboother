@@ -12,23 +12,35 @@ import streamlit as st
 import uuid
 import base64
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from PIL import Image
 import io
+import numpy as np
+import cv2
 
 from database import PhotoDatabase
 from image_processing import (
     process_uploaded_image,
     base64_to_pil,
     pil_to_base64,
-    rotate_image
+    rotate_image,
+    base64_to_cv2,
+    cv2_to_base64,
+    bytes_to_base64,
+    four_point_transform,
+    order_points,
+    create_thumbnail,
+    fix_orientation_from_exif
 )
 from face_recognition_module import (
     detect_faces,
-    recognize_faces,
     extract_face_thumbnail,
     is_available as face_recognition_available
 )
+from crop_editor import render_crop_editor, order_corners, corners_to_default
+from scanner import EdgeDetector, PerspectiveTransformer
+
+EDGE_DETECTOR_AVAILABLE = True
 
 
 # Page configuration
@@ -97,6 +109,13 @@ def init_session_state():
         st.session_state.db_connected = False
     if 'use_local_storage' not in st.session_state:
         st.session_state.use_local_storage = True
+    # Staging state for crop review workflow
+    if 'staged_photos' not in st.session_state:
+        st.session_state.staged_photos = []  # Photos pending crop review
+    if 'crop_review_index' not in st.session_state:
+        st.session_state.crop_review_index = 0  # Current photo in review
+    if 'crop_review_mode' not in st.session_state:
+        st.session_state.crop_review_mode = False  # Whether in crop review mode
 
 
 def has_aws_secrets() -> bool:
@@ -257,115 +276,401 @@ def delete_photo_local(photo_id: str):
         st.session_state.photos = st.session_state.local_photos
 
 
+def detect_photo_boundary(image_bytes: bytes) -> Optional[np.ndarray]:
+    """Detect photo boundary using EdgeDetector."""
+    if not EDGE_DETECTOR_AVAILABLE:
+        return None
+
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+    if image is None:
+        return None
+
+    detector = EdgeDetector(
+        min_area_ratio=0.05,
+        max_area_ratio=0.95,
+        contour_epsilon=0.02
+    )
+
+    boundary = detector.detect(image)
+    return boundary
+
+
+def apply_crop_with_corners(
+    original_base64: str,
+    corners: List[List[float]]
+) -> Tuple[str, str]:
+    """Apply perspective transform crop using specified corners.
+
+    Returns:
+        Tuple of (cropped_base64, thumbnail_base64)
+    """
+    # Convert base64 to cv2 image
+    image = base64_to_cv2(original_base64)
+
+    # Apply perspective transform
+    corners_array = np.array(corners, dtype=np.float32)
+    transformer = PerspectiveTransformer()
+    cropped = transformer.transform(image, corners_array)
+
+    # Convert back to base64
+    cropped_b64 = cv2_to_base64(cropped)
+
+    # Create thumbnail
+    pil_image = base64_to_pil(cropped_b64)
+    pil_image.thumbnail((300, 300), Image.Resampling.LANCZOS)
+    thumb_b64 = pil_to_base64(pil_image)
+
+    return cropped_b64, thumb_b64
+
+
 def upload_section():
-    """Photo upload section."""
+    """Photo upload section with crop review workflow."""
+
+    # Check if we're in crop review mode
+    if st.session_state.crop_review_mode and st.session_state.staged_photos:
+        crop_review_section()
+        return
+
     st.subheader("📤 Upload Photos")
-    
+
     col1, col2 = st.columns([2, 1])
-    
+
     with col1:
         uploaded_files = st.file_uploader(
             "Choose photos to upload",
             type=['jpg', 'jpeg', 'png', 'gif', 'webp'],
-            accept_multiple_files=True
+            accept_multiple_files=True,
+            key="photo_uploader"
         )
-    
+
     with col2:
         auto_crop = st.checkbox("Auto-crop from background", value=True)
+        manual_crop_review = st.checkbox(
+            "Review & adjust crops manually",
+            value=True,
+            help="Review detected boundaries and adjust corners before saving"
+        )
         auto_orient = st.checkbox("Auto-orient", value=True)
         detect_faces_opt = st.checkbox(
             "Detect faces",
             value=face_recognition_available(),
             disabled=not face_recognition_available()
         )
-        
+
         if not face_recognition_available():
             st.caption("⚠️ Face recognition not available")
-    
+
+        if not EDGE_DETECTOR_AVAILABLE:
+            st.caption("⚠️ Edge detection not available")
+            auto_crop = False
+
     if uploaded_files:
-        if st.button("📥 Process & Upload", type="primary"):
+        if st.button("📥 Process Photos", type="primary"):
             progress = st.progress(0)
             status = st.empty()
-            
+
+            staged_photos = []
+
             for i, uploaded_file in enumerate(uploaded_files):
                 status.text(f"Processing {uploaded_file.name}...")
-                
+
                 try:
                     # Read file
                     image_bytes = uploaded_file.read()
-                    
-                    # Process image
-                    processed_b64, thumb_b64, original_b64, orientation = process_uploaded_image(
-                        image_bytes,
-                        auto_crop=auto_crop,
-                        auto_orient=auto_orient
-                    )
-                    
-                    # Detect faces if enabled
-                    faces = []
-                    if detect_faces_opt and face_recognition_available():
-                        # Get known faces for recognition
-                        known_faces = {}
-                        if st.session_state.db and not st.session_state.use_local_storage:
-                            known_faces = st.session_state.db.get_all_known_faces()
-                        else:
-                            # Build from local photos
-                            for photo in st.session_state.photos:
-                                for face in photo.get('faces', []):
-                                    name = face.get('name')
-                                    encoding = face.get('encoding')
-                                    if name and encoding:
-                                        if name not in known_faces:
-                                            known_faces[name] = []
-                                        known_faces[name].append(encoding)
-                        
-                        if known_faces:
-                            faces = recognize_faces(processed_b64, known_faces)
-                        else:
-                            faces = detect_faces(processed_b64)
-                    
-                    # Create photo record
-                    photo_id = str(uuid.uuid4())
-                    timestamp = datetime.utcnow().isoformat()
-                    
-                    photo_data = {
-                        'photo_id': photo_id,
-                        'image_base64': processed_b64,
-                        'thumbnail_base64': thumb_b64,
-                        'original_base64': original_b64,
+                    original_b64 = bytes_to_base64(image_bytes)
+
+                    # Get image dimensions
+                    nparr = np.frombuffer(image_bytes, np.uint8)
+                    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    height, width = image.shape[:2]
+
+                    # Detect boundary if auto-crop enabled
+                    boundary = None
+                    if auto_crop and EDGE_DETECTOR_AVAILABLE:
+                        boundary = detect_photo_boundary(image_bytes)
+
+                    # Convert boundary to corners list or use default
+                    if boundary is not None:
+                        corners = order_corners(boundary.tolist())
+                    else:
+                        corners = corners_to_default(width, height, margin=0.05)
+
+                    # Stage photo for review
+                    staged_photo = {
                         'filename': uploaded_file.name,
-                        'orientation': orientation,
-                        'tags': [],
-                        'is_favorite': False,
-                        'faces': faces,
-                        'created_at': timestamp,
-                        'updated_at': timestamp
+                        'original_base64': original_b64,
+                        'width': width,
+                        'height': height,
+                        'corners': corners,
+                        'auto_orient': auto_orient,
+                        'detect_faces': detect_faces_opt,
+                        'boundary_detected': boundary is not None
                     }
-                    
-                    # Save to storage
-                    if st.session_state.use_local_storage:
-                        save_photo_local(photo_data)
-                    elif st.session_state.db:
-                        st.session_state.db.save_photo(
-                            photo_id=photo_id,
-                            image_base64=processed_b64,
-                            filename=uploaded_file.name,
-                            orientation=orientation,
-                            tags=[],
-                            is_favorite=False,
-                            faces=faces,
-                            thumbnail_base64=thumb_b64,
-                            original_base64=original_b64
-                        )
-                        st.session_state.photos = st.session_state.db.get_all_photos()
-                    
+
+                    staged_photos.append(staged_photo)
+
                 except Exception as e:
                     st.error(f"Error processing {uploaded_file.name}: {str(e)}")
-                
+
                 progress.progress((i + 1) / len(uploaded_files))
-            
-            status.text("✅ Upload complete!")
+
+            if staged_photos:
+                if manual_crop_review:
+                    # Enter crop review mode
+                    st.session_state.staged_photos = staged_photos
+                    st.session_state.crop_review_index = 0
+                    st.session_state.crop_review_mode = True
+                    status.text("✅ Ready for crop review!")
+                    st.rerun()
+                else:
+                    # Skip review, save directly
+                    status.text("Saving photos...")
+                    save_staged_photos(staged_photos)
+                    status.text("✅ Upload complete!")
+                    st.rerun()
+
+
+def crop_review_section():
+    """Interactive crop review section for staged photos."""
+    staged = st.session_state.staged_photos
+    idx = st.session_state.crop_review_index
+    total = len(staged)
+
+    if not staged or idx >= total:
+        st.session_state.crop_review_mode = False
+        st.rerun()
+        return
+
+    current = staged[idx]
+
+    # Header with navigation
+    st.subheader("✂️ Review & Adjust Crop")
+
+    # Navigation and info
+    col1, col2, col3 = st.columns([1, 2, 1])
+
+    with col1:
+        if idx > 0:
+            if st.button("← Previous", key="prev_photo"):
+                st.session_state.crop_review_index -= 1
+                st.rerun()
+
+    with col2:
+        st.markdown(f"**Photo {idx + 1} of {total}**: `{current['filename']}`")
+        if current.get('boundary_detected'):
+            st.caption("✅ Boundary auto-detected")
+        else:
+            st.caption("⚠️ No boundary detected - using default crop area")
+
+    with col3:
+        if idx < total - 1:
+            if st.button("Next →", key="next_photo"):
+                st.session_state.crop_review_index += 1
+                st.rerun()
+
+    st.divider()
+
+    # Render the crop editor
+    editor_key = f"crop_editor_{idx}_{current['filename']}"
+
+    # Use session state to track corner updates for this photo
+    corners_key = f"corners_{idx}"
+    if corners_key not in st.session_state:
+        st.session_state[corners_key] = current['corners']
+
+    # Render interactive editor
+    render_crop_editor(
+        image_base64=current['original_base64'],
+        initial_corners=st.session_state[corners_key],
+        image_width=current['width'],
+        image_height=current['height'],
+        key=editor_key
+    )
+
+    # Corner adjustment inputs (alternative to dragging)
+    with st.expander("Fine-tune corner coordinates"):
+        corner_labels = ["Top-Left", "Top-Right", "Bottom-Right", "Bottom-Left"]
+        corners = st.session_state[corners_key]
+
+        cols = st.columns(4)
+        updated_corners = []
+
+        for i, (label, col) in enumerate(zip(corner_labels, cols)):
+            with col:
+                st.caption(label)
+                x = st.number_input(
+                    "X", value=float(corners[i][0]),
+                    min_value=0.0, max_value=float(current['width']),
+                    key=f"corner_{idx}_{i}_x"
+                )
+                y = st.number_input(
+                    "Y", value=float(corners[i][1]),
+                    min_value=0.0, max_value=float(current['height']),
+                    key=f"corner_{idx}_{i}_y"
+                )
+                updated_corners.append([x, y])
+
+        if updated_corners != corners:
+            st.session_state[corners_key] = updated_corners
+            staged[idx]['corners'] = updated_corners
+
+    st.divider()
+
+    # Action buttons
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        if st.button("🔄 Reset to Auto", key="reset_crop"):
+            if current.get('boundary_detected'):
+                # Re-detect boundary
+                image_bytes = base64.b64decode(current['original_base64'])
+                boundary = detect_photo_boundary(image_bytes)
+                if boundary is not None:
+                    new_corners = order_corners(boundary.tolist())
+                    st.session_state[corners_key] = new_corners
+                    staged[idx]['corners'] = new_corners
+                    st.rerun()
+            else:
+                new_corners = corners_to_default(
+                    current['width'], current['height'], margin=0.05
+                )
+                st.session_state[corners_key] = new_corners
+                staged[idx]['corners'] = new_corners
+                st.rerun()
+
+    with col2:
+        if st.button("📐 Full Image", key="full_image"):
+            new_corners = [
+                [0, 0],
+                [current['width'], 0],
+                [current['width'], current['height']],
+                [0, current['height']]
+            ]
+            st.session_state[corners_key] = new_corners
+            staged[idx]['corners'] = new_corners
             st.rerun()
+
+    with col3:
+        if st.button("🗑️ Skip This Photo", key="skip_photo"):
+            staged.pop(idx)
+            if idx >= len(staged):
+                st.session_state.crop_review_index = max(0, len(staged) - 1)
+            if not staged:
+                st.session_state.crop_review_mode = False
+            st.rerun()
+
+    with col4:
+        save_label = "💾 Save All Photos" if total > 1 else "💾 Save Photo"
+        if st.button(save_label, type="primary", key="save_all"):
+            with st.spinner("Saving photos..."):
+                # Update corners from session state before saving
+                for i, photo in enumerate(staged):
+                    ck = f"corners_{i}"
+                    if ck in st.session_state:
+                        photo['corners'] = st.session_state[ck]
+
+                save_staged_photos(staged)
+
+                # Clear staging state
+                st.session_state.staged_photos = []
+                st.session_state.crop_review_index = 0
+                st.session_state.crop_review_mode = False
+
+                # Clear corner session states
+                for i in range(total):
+                    ck = f"corners_{i}"
+                    if ck in st.session_state:
+                        del st.session_state[ck]
+
+            st.success(f"✅ Saved {total} photo(s)!")
+            st.rerun()
+
+    # Cancel button
+    st.divider()
+    if st.button("❌ Cancel Upload", key="cancel_upload"):
+        st.session_state.staged_photos = []
+        st.session_state.crop_review_index = 0
+        st.session_state.crop_review_mode = False
+        st.rerun()
+
+
+def save_staged_photos(staged_photos: List[Dict[str, Any]]):
+    """Save all staged photos after crop review."""
+    for staged in staged_photos:
+        try:
+            # Apply crop with adjusted corners
+            cropped_b64, thumb_b64 = apply_crop_with_corners(
+                staged['original_base64'],
+                staged['corners']
+            )
+
+            # Apply orientation correction if enabled
+            orientation = 0
+            if staged.get('auto_orient'):
+                pil_image = base64_to_pil(cropped_b64)
+                pil_image = fix_orientation_from_exif(pil_image)
+
+                # Simple aspect ratio based orientation
+                width, height = pil_image.size
+                if width / height > 1.5:
+                    # Likely sideways, rotate
+                    pil_image = pil_image.rotate(-90, expand=True)
+                    orientation = 90
+
+                cropped_b64 = pil_to_base64(pil_image)
+                thumb_b64 = pil_to_base64(create_thumbnail(pil_image))
+
+            # Detect faces if enabled
+            faces = []
+            if staged.get('detect_faces') and face_recognition_available():
+                faces = detect_faces(cropped_b64)
+
+            # Extract face_tags from detected faces
+            face_tags = sorted(list(set(
+                f.get('name') for f in faces if f.get('name')
+            )))
+
+            # Create photo record
+            photo_id = str(uuid.uuid4())
+            timestamp = datetime.utcnow().isoformat()
+
+            photo_data = {
+                'photo_id': photo_id,
+                'image_base64': cropped_b64,
+                'thumbnail_base64': thumb_b64,
+                'original_base64': staged['original_base64'],
+                'filename': staged['filename'],
+                'orientation': orientation,
+                'tags': [],
+                'face_tags': face_tags,
+                'is_favorite': False,
+                'faces': faces,
+                'created_at': timestamp,
+                'updated_at': timestamp
+            }
+
+            # Save to storage
+            if st.session_state.use_local_storage:
+                save_photo_local(photo_data)
+            elif st.session_state.db:
+                st.session_state.db.save_photo(
+                    photo_id=photo_id,
+                    image_base64=cropped_b64,
+                    filename=staged['filename'],
+                    orientation=orientation,
+                    tags=[],
+                    face_tags=face_tags,
+                    is_favorite=False,
+                    faces=faces,
+                    thumbnail_base64=thumb_b64,
+                    original_base64=staged['original_base64']
+                )
+                st.session_state.photos = st.session_state.db.get_all_photos()
+
+        except Exception as e:
+            st.error(f"Error saving {staged['filename']}: {str(e)}")
 
 
 def gallery_view(photos: List[Dict[str, Any]]):
@@ -399,10 +704,15 @@ def gallery_view(photos: List[Dict[str, Any]]):
                     star = "⭐" if photo.get('is_favorite') else "☆"
                     face_count = len(photo.get('faces', []))
                     face_icon = f"👤{face_count}" if face_count else ""
-                    
+
                     st.caption(f"{star} {face_icon}")
-                    
-                    # Tags
+
+                    # Face tags (people in photo)
+                    face_tags = photo.get('face_tags', [])
+                    if face_tags:
+                        st.caption(" ".join([f"👤`{ft}`" for ft in face_tags[:2]]))
+
+                    # User tags
                     tags = photo.get('tags', [])
                     if tags:
                         st.caption(" ".join([f"`{t}`" for t in tags[:3]]))
@@ -466,11 +776,25 @@ def photo_detail_view(photo: Dict[str, Any]):
             update_photo_field(photo['photo_id'], 'is_favorite', not is_fav)
         
         st.divider()
-        
-        # Tags section
+
+        # Face Tags section (people in photo - from face recognition)
+        st.write("**People in Photo**")
+        current_face_tags = photo.get('face_tags', [])
+
+        if current_face_tags:
+            face_tag_cols = st.columns(3)
+            for i, face_tag in enumerate(current_face_tags):
+                with face_tag_cols[i % 3]:
+                    st.markdown(f"👤 `{face_tag}`")
+        else:
+            st.caption("No people identified yet. Name faces below to add them here.")
+
+        st.divider()
+
+        # User Tags section
         st.write("**Tags**")
         current_tags = photo.get('tags', [])
-        
+
         # Display current tags
         if current_tags:
             tag_cols = st.columns(3)
@@ -481,14 +805,14 @@ def photo_detail_view(photo: Dict[str, Any]):
                         update_photo_field(photo['photo_id'], 'tags', new_tags)
         else:
             st.caption("No tags yet")
-        
+
         # Add new tag
         new_tag = st.text_input("Add tag", key=f"new_tag_{photo['photo_id']}")
         if st.button("Add Tag") and new_tag:
             if new_tag not in current_tags:
                 new_tags = current_tags + [new_tag]
                 update_photo_field(photo['photo_id'], 'tags', new_tags)
-        
+
         st.divider()
         
         # Faces section
@@ -530,24 +854,18 @@ def photo_detail_view(photo: Dict[str, Any]):
                             update_photo_field(photo['photo_id'], 'faces', updated_faces)
         else:
             st.caption("No faces detected")
-            
+
             if st.button("🔍 Detect Faces Now"):
                 if face_recognition_available():
-                    # Get known faces
-                    known_faces = get_known_faces()
-                    
-                    if known_faces:
-                        new_faces = recognize_faces(photo['image_base64'], known_faces)
-                    else:
-                        new_faces = detect_faces(photo['image_base64'])
-                    
+                    new_faces = detect_faces(photo['image_base64'])
+
                     if new_faces:
                         update_photo_field(photo['photo_id'], 'faces', new_faces)
-                        st.success(f"Detected {len(new_faces)} face(s)!")
+                        st.success(f"Detected {len(new_faces)} face(s)! Add names below.")
                     else:
                         st.info("No faces detected in this photo.")
                 else:
-                    st.warning("Face recognition not available.")
+                    st.warning("Face detection not available.")
         
         st.divider()
         
@@ -571,25 +889,6 @@ def photo_detail_view(photo: Dict[str, Any]):
         st.caption(f"Created: {photo.get('created_at', 'Unknown')[:10]}")
 
 
-def get_known_faces() -> Dict[str, List[List[float]]]:
-    """Get all known faces from storage."""
-    known_faces = {}
-    
-    if st.session_state.use_local_storage:
-        for photo in st.session_state.photos:
-            for face in photo.get('faces', []):
-                name = face.get('name')
-                encoding = face.get('encoding')
-                if name and encoding:
-                    if name not in known_faces:
-                        known_faces[name] = []
-                    known_faces[name].append(encoding)
-    elif st.session_state.db:
-        known_faces = st.session_state.db.get_all_known_faces()
-    
-    return known_faces
-
-
 def update_photo_field(photo_id: str, field: str, value: Any):
     """Update a single field of a photo."""
     if st.session_state.use_local_storage:
@@ -597,13 +896,19 @@ def update_photo_field(photo_id: str, field: str, value: Any):
             if photo['photo_id'] == photo_id:
                 photo[field] = value
                 photo['updated_at'] = datetime.utcnow().isoformat()
+                # Auto-sync face_tags when faces are updated
+                if field == 'faces':
+                    photo['face_tags'] = sorted(list(set(
+                        f.get('name') for f in value if f.get('name')
+                    )))
                 break
         st.session_state.photos = st.session_state.local_photos
     elif st.session_state.db:
         kwargs = {field: value}
+        # Note: database.update_photo auto-syncs face_tags when faces are updated
         st.session_state.db.update_photo(photo_id, **kwargs)
         st.session_state.photos = st.session_state.db.get_all_photos()
-    
+
     st.rerun()
 
 
@@ -627,62 +932,83 @@ def favorites_view():
 def search_view():
     """Search and filter photos."""
     st.subheader("🔍 Search Photos")
-    
-    col1, col2, col3 = st.columns(3)
-    
+
+    col1, col2 = st.columns(2)
+
     with col1:
-        # Search by tag
+        # Search by face tag (people from face recognition)
+        all_face_tags = get_all_face_tags()
+        selected_face_tag = st.selectbox(
+            "👤 Filter by person (face recognition)",
+            ["All"] + all_face_tags
+        )
+
+    with col2:
+        # Search by user tag
         all_tags = get_all_tags()
         selected_tag = st.selectbox(
-            "Filter by tag",
+            "🏷️ Filter by tag",
             ["All"] + all_tags
         )
-    
-    with col2:
-        # Search by person
-        all_people = get_all_people()
-        selected_person = st.selectbox(
-            "Filter by person",
-            ["All"] + all_people
-        )
-    
+
+    col3, col4 = st.columns(2)
+
     with col3:
-        # Text search
-        search_text = st.text_input("Search tags", "")
-    
+        # Text search for face tags
+        search_face_text = st.text_input("Search people", "")
+
+    with col4:
+        # Text search for tags
+        search_tag_text = st.text_input("Search tags", "")
+
     # Apply filters
     filtered_photos = st.session_state.photos.copy()
-    
-    if selected_tag != "All":
-        filtered_photos = [
-            p for p in filtered_photos 
-            if selected_tag in p.get('tags', [])
-        ]
-    
-    if selected_person != "All":
+
+    if selected_face_tag != "All":
         filtered_photos = [
             p for p in filtered_photos
-            if any(f.get('name') == selected_person for f in p.get('faces', []))
+            if selected_face_tag in p.get('face_tags', [])
         ]
-    
-    if search_text:
-        search_lower = search_text.lower()
+
+    if selected_tag != "All":
+        filtered_photos = [
+            p for p in filtered_photos
+            if selected_tag in p.get('tags', [])
+        ]
+
+    if search_face_text:
+        search_lower = search_face_text.lower()
+        filtered_photos = [
+            p for p in filtered_photos
+            if any(search_lower in ft.lower() for ft in p.get('face_tags', []))
+        ]
+
+    if search_tag_text:
+        search_lower = search_tag_text.lower()
         filtered_photos = [
             p for p in filtered_photos
             if any(search_lower in t.lower() for t in p.get('tags', []))
         ]
-    
+
     st.write(f"Showing {len(filtered_photos)} of {len(st.session_state.photos)} photos")
-    
+
     gallery_view(filtered_photos)
 
 
 def get_all_tags() -> List[str]:
-    """Get all unique tags."""
+    """Get all unique user tags."""
     all_tags = set()
     for photo in st.session_state.photos:
         all_tags.update(photo.get('tags', []))
     return sorted(list(all_tags))
+
+
+def get_all_face_tags() -> List[str]:
+    """Get all unique face tags (person names from face recognition)."""
+    all_face_tags = set()
+    for photo in st.session_state.photos:
+        all_face_tags.update(photo.get('face_tags', []))
+    return sorted(list(all_face_tags))
 
 
 def get_all_people() -> List[str]:

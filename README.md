@@ -1,32 +1,52 @@
-# Photo Storage App 📸
+# Photo Storage App v2.0
 
-A feature-rich photo storage application built with Python and Streamlit, with DynamoDB backend support and facial recognition capabilities.
+A feature-rich photo storage application built with Python and Streamlit, featuring advanced edge detection, interactive crop refinement, facial recognition, and cloud storage support.
+
+## What's New in v2.0
+
+### Advanced Edge Detection
+- **Multi-method boundary detection**: Uses 6 different algorithms (Canny, adaptive threshold, color segmentation, saturation-based, Sobel+Laplacian, GrabCut) for robust photo detection
+- **Smart scoring**: Automatically selects the best detected boundary based on photo-likeness metrics
+- **Works on varied backgrounds**: Handles wood, fabric, colored surfaces, and more
+
+### Interactive Crop Refinement
+- **Visual crop editor**: See detected boundaries overlaid on original image
+- **Draggable corner handles**: Adjust crop area by dragging corner dots
+- **Magnifier window**: 3x zoom follows your cursor for precise positioning
+- **Batch processing**: Review and adjust multiple photos with Previous/Next navigation
+- **Fine-tune controls**: Manual coordinate input for pixel-perfect adjustments
+
+### Face Tags (Separate from User Tags)
+- **Automatic face tagging**: Names assigned to faces are stored separately as `face_tags`
+- **Independent search**: Filter by people (face recognition) or by user tags separately
+- **Auto-sync**: Face tags update automatically when you name faces
 
 ## Features
 
-### 📤 Photo Upload & Processing
-- **Auto-crop**: Automatically detects and crops photos from high-contrast backgrounds (perfect for scanned photo strips, photos on desks, etc.)
-- **Auto-orient**: Uses EXIF data and image analysis to properly orient photos
-- **Manual orientation**: Rotate photos 90°, 180°, or 270° after upload
+### Photo Upload & Processing
+- **Auto-crop**: Intelligent boundary detection for photos on any background
+- **Manual refinement**: Interactive editor to adjust detected boundaries
+- **Auto-orient**: EXIF-based and aspect ratio analysis orientation correction
+- **Batch upload**: Process multiple photos at once with individual review
 
-### 🏷️ Tagging System
-- Add custom tags to any photo
-- Search photos by tag
-- Filter gallery by tag
+### Tagging System
+- **User tags**: Add custom descriptive tags to any photo
+- **Face tags**: Automatic tags from named faces (kept separate)
+- **Dual search**: Filter by either tag type independently
 
-### ⭐ Favorites
+### Favorites
 - Star your favorite photos
 - Quick access via Favorites tab
 
-### 👤 Facial Recognition
+### Facial Recognition
 - Automatic face detection in uploaded photos
 - Name faces to create a person database
 - Automatic recognition of known people in new photos
-- Browse photos by person
+- Browse photos by person in the People tab
 
-### 💾 Storage Options
+### Storage Options
 - **Demo Mode**: Photos stored in browser session (no setup required)
-- **AWS DynamoDB**: Persistent cloud storage with photos stored as base64
+- **AWS DynamoDB + S3**: Persistent cloud storage with S3 for images
 
 ## Installation
 
@@ -34,11 +54,12 @@ A feature-rich photo storage application built with Python and Streamlit, with D
 - Python 3.9+
 - pip
 
-### Basic Setup
+### Quick Start
 
 ```bash
-# Clone or download the app
-cd photo_app
+# Clone the repository
+git clone <repo-url>
+cd photobooth-archive
 
 # Create virtual environment (recommended)
 python -m venv venv
@@ -46,7 +67,12 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Run the app
+streamlit run app.py
 ```
+
+The app will open in your browser at `http://localhost:8501`
 
 ### Face Recognition Setup (Optional)
 
@@ -71,65 +97,101 @@ pip install face-recognition
 - Install cmake
 - `pip install face-recognition`
 
-The app works without face recognition - you'll just see a warning that the feature is unavailable.
-
-## Running the App
-
-```bash
-streamlit run app.py
-```
-
-The app will open in your browser at `http://localhost:8501`
+The app works without face recognition - you'll see a warning that the feature is unavailable.
 
 ## Usage Guide
 
-### Storage Setup
-1. On first launch, choose your storage type:
-   - **Local (Demo Mode)**: No setup needed, photos persist only during session
-   - **AWS DynamoDB**: Enter your AWS credentials and table name
-
 ### Uploading Photos
+
 1. Go to the **Upload** tab
 2. Drag & drop or select photos
 3. Configure options:
-   - **Auto-crop**: Enable for photos against backgrounds (like the photo strip example)
-   - **Auto-orient**: Enable to fix rotated photos
-   - **Detect faces**: Enable to find faces in photos
-4. Click "Process & Upload"
+   - **Auto-crop**: Detect photo boundaries automatically
+   - **Review & adjust crops**: Enable interactive crop editor
+   - **Auto-orient**: Fix rotated photos
+   - **Detect faces**: Find faces in photos
+4. Click **Process Photos**
+
+### Crop Review (New in v2)
+
+When "Review & adjust crops" is enabled:
+
+1. **View detected boundary**: Green box shows detected photo edges
+2. **Drag corners**: Click and drag the corner dots to adjust
+3. **Use magnifier**: Hover over corners to see zoomed view
+4. **Navigate batch**: Use Previous/Next buttons for multiple photos
+5. **Quick actions**:
+   - **Reset to Auto**: Re-detect boundary
+   - **Full Image**: Use entire image (no crop)
+   - **Skip**: Remove photo from batch
+6. Click **Save All Photos** when done
 
 ### Managing Photos
-- **Gallery**: View all photos in a grid
-- **View details**: Click any photo to see full size
-- **Rotate**: Use orientation buttons to rotate
-- **Tag**: Add/remove tags in detail view
-- **Favorite**: Click ☆ to add to favorites
 
-### Facial Recognition
-1. Upload a photo with faces
-2. Click on a photo to view details
-3. Named faces appear in the Faces section
-4. Enter a name for each face and click Save
-5. That person will be auto-recognized in future uploads
+- **Gallery**: View all photos in a grid
+- **View details**: Click any photo for full view
+- **Rotate**: Use orientation buttons
+- **Tag**: Add user tags in detail view
+- **People**: View face tags (auto-populated from named faces)
+- **Favorite**: Click star to add to favorites
 
 ### Searching
-- **By Tag**: Select from dropdown
-- **By Person**: Select from dropdown
-- **Text Search**: Type to filter tags
 
-## AWS DynamoDB Setup
+- **By Person**: Filter by face tags (people identified via face recognition)
+- **By Tag**: Filter by user-added tags
+- **Text Search**: Type to filter either category
 
-### Creating the Table
-The app automatically creates the table if it doesn't exist, but you can also create it manually:
+## File Structure
+
+```
+photobooth-archive/
+├── app.py                      # Main Streamlit application
+├── database.py                 # DynamoDB + S3 integration
+├── image_processing.py         # Image processing utilities
+├── face_recognition_module.py  # Face detection and recognition
+├── crop_editor.py              # Interactive crop editor component
+├── scanner/                    # Edge detection module
+│   ├── __init__.py
+│   ├── detector.py             # Multi-method boundary detection
+│   └── transformer.py          # Perspective transformation
+├── requirements.txt            # Python dependencies
+└── README.md                   # This file
+```
+
+## How Auto-Crop Works
+
+The v2 edge detection uses multiple strategies:
+
+1. **Multi-threshold Canny**: Edge detection at various sensitivity levels
+2. **Adaptive Threshold**: Local threshold adaptation for uneven lighting
+3. **Color Segmentation**: LAB color space background differentiation
+4. **Saturation Detection**: Photos typically more colorful than backgrounds
+5. **Combined Edges**: Sobel + Laplacian edge combination
+6. **GrabCut**: Foreground/background segmentation
+
+Each method produces candidate boundaries, which are scored on:
+- Area ratio (prefer medium-sized regions)
+- Convexity (prefer convex shapes)
+- Aspect ratio (prefer common photo ratios: 4x6, 5x7, etc.)
+- Angle alignment (prefer axis-aligned rectangles)
+- Edge proximity (penalize shapes touching image borders)
+
+The highest-scoring boundary is selected and can be manually refined.
+
+## AWS Setup
+
+### Environment Variables
 
 ```bash
-aws dynamodb create-table \
-    --table-name PhotoStorageApp \
-    --attribute-definitions AttributeName=photo_id,AttributeType=S \
-    --key-schema AttributeName=photo_id,KeyType=HASH \
-    --billing-mode PAY_PER_REQUEST
+export AWS_ACCESS_KEY_ID=your_key
+export AWS_SECRET_ACCESS_KEY=your_secret
+export AWS_DEFAULT_REGION=us-east-1
+export DYNAMODB_TABLE=PhotoStorageApp
+export S3_BUCKET=your-photo-bucket
 ```
 
 ### Required IAM Permissions
+
 ```json
 {
     "Version": "2012-10-17",
@@ -146,47 +208,39 @@ aws dynamodb create-table \
                 "dynamodb:DescribeTable"
             ],
             "Resource": "arn:aws:dynamodb:*:*:table/PhotoStorageApp"
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:DeleteObject",
+                "s3:ListBucket",
+                "s3:CreateBucket"
+            ],
+            "Resource": [
+                "arn:aws:s3:::your-photo-bucket",
+                "arn:aws:s3:::your-photo-bucket/*"
+            ]
         }
     ]
 }
 ```
 
-### Environment Variables (Alternative to UI)
-Instead of entering credentials in the UI, you can set environment variables:
+## Streamlit Cloud Deployment
 
-```bash
-export AWS_ACCESS_KEY_ID=your_key
-export AWS_SECRET_ACCESS_KEY=your_secret
-export AWS_DEFAULT_REGION=us-east-1
+1. Push code to GitHub
+2. Connect repository to Streamlit Cloud
+3. Add secrets in Streamlit Cloud dashboard:
+
+```toml
+[aws]
+access_key_id = "your_key"
+secret_access_key = "your_secret"
+region = "us-east-1"
+table_name = "PhotoStorageApp"
+s3_bucket = "your-bucket"
 ```
-
-## File Structure
-
-```
-photo_app/
-├── app.py                    # Main Streamlit application
-├── database.py               # DynamoDB integration
-├── image_processing.py       # Auto-crop, orientation, thumbnails
-├── face_recognition_module.py # Face detection and recognition
-├── requirements.txt          # Python dependencies
-└── README.md                 # This file
-```
-
-## How Auto-Crop Works
-
-The auto-crop feature uses computer vision to detect photos against contrasting backgrounds:
-
-1. Converts image to grayscale
-2. Applies edge detection (Canny)
-3. Finds contours in the image
-4. Looks for quadrilateral shapes (4-sided)
-5. Applies perspective transform to straighten
-6. Returns the cropped, straightened photo
-
-This works best with:
-- Photos on solid-color backgrounds
-- High contrast between photo and background
-- Reasonably flat photos (not overly curved)
 
 ## Troubleshooting
 
@@ -195,21 +249,38 @@ This works best with:
 - On some systems, you may need to install dlib first
 
 ### Photos not cropping correctly
-- Ensure there's good contrast between photo and background
-- Try with a darker or lighter background
-- Manual cropping can be done in an image editor before upload
+- Enable "Review & adjust crops" to manually refine boundaries
+- Try different backgrounds with more contrast
+- Use the magnifier for precise corner placement
 
 ### DynamoDB connection issues
 - Verify your AWS credentials are correct
-- Check your IAM permissions
+- Check your IAM permissions include both DynamoDB and S3
 - Ensure the region is correct
-- Try creating the table manually first
 
 ### App running slowly
 - Face recognition can be slow on large images
-- Thumbnails are created to speed up gallery view
-- Consider uploading smaller images
+- Large batches may take time to process
+- Consider reducing image size before upload
 
 ## License
 
 MIT License - feel free to modify and use as needed!
+
+## Changelog
+
+### v2.0
+- Added multi-method edge detection (6 algorithms)
+- Added interactive crop editor with draggable corners
+- Added magnifier for precise crop adjustment
+- Added batch upload with review workflow
+- Added face_tags separate from user tags
+- Added dual search (by person / by tag)
+- Integrated scanner module directly into app
+- Improved boundary scoring algorithm
+
+### v1.0
+- Initial release with basic auto-crop
+- Face recognition
+- DynamoDB storage
+- Tagging and favorites

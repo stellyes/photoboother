@@ -1,5 +1,6 @@
 """
-Facial recognition module for detecting faces and matching with known people.
+Face detection module using MediaPipe.
+Detects faces in photos - users manually tag names for search.
 """
 
 import numpy as np
@@ -8,69 +9,92 @@ import io
 import base64
 from typing import List, Dict, Any, Optional, Tuple
 
-# Try to import face_recognition, provide fallback if not available
+# Try to import mediapipe, provide fallback if not available
 try:
-    import face_recognition
-    FACE_RECOGNITION_AVAILABLE = True
+    import mediapipe as mp
+    MEDIAPIPE_AVAILABLE = True
 except ImportError:
-    FACE_RECOGNITION_AVAILABLE = False
-    print("Warning: face_recognition not available. Facial recognition features disabled.")
+    MEDIAPIPE_AVAILABLE = False
+    print("Warning: mediapipe not available. Face detection features disabled.")
 
 
 def base64_to_numpy(base64_string: str) -> np.ndarray:
-    """Convert base64 string to numpy array for face_recognition."""
+    """Convert base64 string to numpy array."""
     img_data = base64.b64decode(base64_string)
     pil_image = Image.open(io.BytesIO(img_data))
-    
+
     # Convert to RGB
     if pil_image.mode != 'RGB':
         pil_image = pil_image.convert('RGB')
-    
+
     return np.array(pil_image)
 
 
 def detect_faces(image_base64: str) -> List[Dict[str, Any]]:
     """
-    Detect faces in an image.
-    
+    Detect faces in an image using MediaPipe.
+
     Args:
         image_base64: Base64 encoded image
-        
+
     Returns:
-        List of face data with locations and encodings
+        List of face data with locations (no encodings - users tag manually)
     """
-    if not FACE_RECOGNITION_AVAILABLE:
+    if not MEDIAPIPE_AVAILABLE:
         return []
-    
+
     try:
         image = base64_to_numpy(image_base64)
-        
-        # Find face locations
-        face_locations = face_recognition.face_locations(image, model='hog')
-        
-        if not face_locations:
-            return []
-        
-        # Get face encodings
-        face_encodings = face_recognition.face_encodings(image, face_locations)
-        
-        faces = []
-        for i, (location, encoding) in enumerate(zip(face_locations, face_encodings)):
-            top, right, bottom, left = location
-            faces.append({
-                'face_id': i,
-                'location': {
-                    'top': top,
-                    'right': right,
-                    'bottom': bottom,
-                    'left': left
-                },
-                'encoding': encoding.tolist(),
-                'name': None  # To be filled in by user
-            })
-        
-        return faces
-    
+        height, width = image.shape[:2]
+
+        # Initialize MediaPipe Face Detection
+        mp_face_detection = mp.solutions.face_detection
+
+        with mp_face_detection.FaceDetection(
+            model_selection=1,  # 1 = full range model (better for varied distances)
+            min_detection_confidence=0.5
+        ) as face_detection:
+
+            # Process the image
+            results = face_detection.process(image)
+
+            if not results.detections:
+                return []
+
+            faces = []
+            for i, detection in enumerate(results.detections):
+                # Get bounding box (relative coordinates)
+                bbox = detection.location_data.relative_bounding_box
+
+                # Convert to absolute pixel coordinates
+                left = int(bbox.xmin * width)
+                top = int(bbox.ymin * height)
+                right = int((bbox.xmin + bbox.width) * width)
+                bottom = int((bbox.ymin + bbox.height) * height)
+
+                # Clamp to image bounds
+                left = max(0, left)
+                top = max(0, top)
+                right = min(width, right)
+                bottom = min(height, bottom)
+
+                # Get detection confidence
+                confidence = detection.score[0] if detection.score else 0.0
+
+                faces.append({
+                    'face_id': i,
+                    'location': {
+                        'top': top,
+                        'right': right,
+                        'bottom': bottom,
+                        'left': left
+                    },
+                    'confidence': float(confidence),
+                    'name': None  # User will fill this in
+                })
+
+            return faces
+
     except Exception as e:
         print(f"Error detecting faces: {e}")
         return []
@@ -82,77 +106,22 @@ def recognize_faces(
     tolerance: float = 0.6
 ) -> List[Dict[str, Any]]:
     """
-    Detect and recognize faces in an image.
-    
+    Detect faces in an image.
+
+    Note: MediaPipe doesn't do recognition/matching. This function just
+    detects faces - the known_faces parameter is ignored but kept for
+    API compatibility with the old face_recognition-based code.
+
     Args:
         image_base64: Base64 encoded image
-        known_faces: Dictionary mapping names to lists of face encodings
-        tolerance: How strict the matching should be (lower = stricter)
-        
+        known_faces: Ignored (kept for compatibility)
+        tolerance: Ignored (kept for compatibility)
+
     Returns:
-        List of face data with locations, encodings, and recognized names
+        List of detected faces (without automatic name matching)
     """
-    if not FACE_RECOGNITION_AVAILABLE:
-        return []
-    
-    try:
-        image = base64_to_numpy(image_base64)
-        
-        # Find face locations and encodings
-        face_locations = face_recognition.face_locations(image, model='hog')
-        
-        if not face_locations:
-            return []
-        
-        face_encodings = face_recognition.face_encodings(image, face_locations)
-        
-        # Prepare known face data
-        known_encodings = []
-        known_names = []
-        for name, encodings in known_faces.items():
-            for enc in encodings:
-                known_encodings.append(np.array(enc))
-                known_names.append(name)
-        
-        faces = []
-        for i, (location, encoding) in enumerate(zip(face_locations, face_encodings)):
-            top, right, bottom, left = location
-            
-            recognized_name = None
-            
-            if known_encodings:
-                # Compare to known faces
-                matches = face_recognition.compare_faces(
-                    known_encodings, encoding, tolerance=tolerance
-                )
-                
-                if True in matches:
-                    # Get face distances for all matches
-                    face_distances = face_recognition.face_distance(
-                        known_encodings, encoding
-                    )
-                    best_match_idx = np.argmin(face_distances)
-                    
-                    if matches[best_match_idx]:
-                        recognized_name = known_names[best_match_idx]
-            
-            faces.append({
-                'face_id': i,
-                'location': {
-                    'top': top,
-                    'right': right,
-                    'bottom': bottom,
-                    'left': left
-                },
-                'encoding': encoding.tolist(),
-                'name': recognized_name
-            })
-        
-        return faces
-    
-    except Exception as e:
-        print(f"Error recognizing faces: {e}")
-        return []
+    # Just detect faces - no automatic recognition with MediaPipe
+    return detect_faces(image_base64)
 
 
 def extract_face_thumbnail(
@@ -163,103 +132,42 @@ def extract_face_thumbnail(
 ) -> Optional[str]:
     """
     Extract a thumbnail of a specific face from an image.
-    
+
     Args:
         image_base64: Base64 encoded image
         face_location: Dictionary with top, right, bottom, left
         padding: Pixels to add around the face
         size: Output thumbnail size
-        
+
     Returns:
         Base64 encoded face thumbnail or None
     """
     try:
         img_data = base64.b64decode(image_base64)
         pil_image = Image.open(io.BytesIO(img_data))
-        
+
         if pil_image.mode != 'RGB':
             pil_image = pil_image.convert('RGB')
-        
+
         width, height = pil_image.size
-        
+
         top = max(0, face_location['top'] - padding)
         right = min(width, face_location['right'] + padding)
         bottom = min(height, face_location['bottom'] + padding)
         left = max(0, face_location['left'] - padding)
-        
+
         face_image = pil_image.crop((left, top, right, bottom))
         face_image = face_image.resize(size, Image.Resampling.LANCZOS)
-        
+
         buffer = io.BytesIO()
         face_image.save(buffer, format='JPEG', quality=90)
         return base64.b64encode(buffer.getvalue()).decode('utf-8')
-    
+
     except Exception as e:
         print(f"Error extracting face thumbnail: {e}")
         return None
 
 
-def get_face_encoding_from_image(image_base64: str) -> Optional[List[float]]:
-    """
-    Get a single face encoding from an image (expects one face).
-    
-    Useful for adding a new known face from a clear portrait.
-    
-    Args:
-        image_base64: Base64 encoded image
-        
-    Returns:
-        Face encoding as list of floats or None
-    """
-    if not FACE_RECOGNITION_AVAILABLE:
-        return None
-    
-    try:
-        image = base64_to_numpy(image_base64)
-        encodings = face_recognition.face_encodings(image)
-        
-        if encodings:
-            return encodings[0].tolist()
-        return None
-    
-    except Exception as e:
-        print(f"Error getting face encoding: {e}")
-        return None
-
-
-def compare_faces(
-    encoding1: List[float],
-    encoding2: List[float],
-    tolerance: float = 0.6
-) -> Tuple[bool, float]:
-    """
-    Compare two face encodings.
-    
-    Args:
-        encoding1: First face encoding
-        encoding2: Second face encoding
-        tolerance: Matching tolerance
-        
-    Returns:
-        Tuple of (is_match, distance)
-    """
-    if not FACE_RECOGNITION_AVAILABLE:
-        return False, 1.0
-    
-    try:
-        enc1 = np.array(encoding1)
-        enc2 = np.array(encoding2)
-        
-        distance = face_recognition.face_distance([enc1], enc2)[0]
-        is_match = distance <= tolerance
-        
-        return is_match, float(distance)
-    
-    except Exception as e:
-        print(f"Error comparing faces: {e}")
-        return False, 1.0
-
-
 def is_available() -> bool:
-    """Check if facial recognition is available."""
-    return FACE_RECOGNITION_AVAILABLE
+    """Check if face detection is available."""
+    return MEDIAPIPE_AVAILABLE

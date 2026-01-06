@@ -180,6 +180,17 @@ class PhotoDatabase:
         except ClientError:
             pass
 
+    def _extract_face_tags(self, faces: Optional[List[Dict[str, Any]]]) -> List[str]:
+        """Extract unique person names from faces list as face_tags."""
+        if not faces:
+            return []
+        names = set()
+        for face in faces:
+            name = face.get('name')
+            if name:
+                names.add(name)
+        return sorted(list(names))
+
     def save_photo(
         self,
         photo_id: str,
@@ -189,6 +200,7 @@ class PhotoDatabase:
         tags: Optional[List[str]] = None,
         is_favorite: bool = False,
         faces: Optional[List[Dict[str, Any]]] = None,
+        face_tags: Optional[List[str]] = None,
         thumbnail_base64: Optional[str] = None,
         original_base64: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -200,9 +212,10 @@ class PhotoDatabase:
             image_base64: Base64 encoded image data (cropped/processed version)
             filename: Original filename
             orientation: Rotation in degrees (0, 90, 180, 270)
-            tags: List of tags for searching
+            tags: List of user-added tags for searching
             is_favorite: Whether photo is starred
             faces: List of face data with encodings and names
+            face_tags: List of person names from face recognition (auto-synced from faces)
             thumbnail_base64: Base64 encoded thumbnail
             original_base64: Base64 encoded original image before cropping
 
@@ -210,6 +223,10 @@ class PhotoDatabase:
             The saved item metadata
         """
         timestamp = datetime.utcnow().isoformat()
+
+        # Auto-extract face_tags from faces if not provided
+        if face_tags is None:
+            face_tags = self._extract_face_tags(faces)
 
         # Upload images to S3
         image_key = ""
@@ -229,6 +246,7 @@ class PhotoDatabase:
             'filename': filename,
             'orientation': orientation,
             'tags': tags or [],
+            'face_tags': face_tags,
             'is_favorite': is_favorite,
             'faces': json.dumps(faces) if faces else '[]',
             'created_at': timestamp,
@@ -257,6 +275,7 @@ class PhotoDatabase:
         if original_base64:
             item['original_base64'] = original_base64
         item['faces'] = faces or []
+        item['face_tags'] = face_tags
 
         return item
 
@@ -394,11 +413,48 @@ class PhotoDatabase:
 
         return matching
 
+    def search_by_face_tags(self, search_names: List[str]) -> List[Dict[str, Any]]:
+        """
+        Search photos by face tags (person names from face recognition).
+
+        Args:
+            search_names: List of person names to search for
+
+        Returns:
+            List of matching photos
+        """
+        all_photos = self.get_all_photos()
+        search_names_lower = [n.lower() for n in search_names]
+
+        matching = []
+        for photo in all_photos:
+            photo_face_tags = [t.lower() for t in photo.get('face_tags', [])]
+            if any(sn in photo_face_tags for sn in search_names_lower):
+                matching.append(photo)
+
+        return matching
+
+    def get_all_face_tags(self) -> List[str]:
+        """
+        Get all unique face tags (person names) across all photos.
+
+        Returns:
+            Sorted list of unique face tags
+        """
+        all_photos = self.get_all_photos(include_full_images=False)
+        all_face_tags = set()
+
+        for photo in all_photos:
+            all_face_tags.update(photo.get('face_tags', []))
+
+        return sorted(list(all_face_tags))
+
     def update_photo(
         self,
         photo_id: str,
         orientation: Optional[int] = None,
         tags: Optional[List[str]] = None,
+        face_tags: Optional[List[str]] = None,
         is_favorite: Optional[bool] = None,
         faces: Optional[List[Dict[str, Any]]] = None,
         image_base64: Optional[str] = None
@@ -409,7 +465,8 @@ class PhotoDatabase:
         Args:
             photo_id: Photo to update
             orientation: New orientation (if provided)
-            tags: New tags (if provided)
+            tags: New user-added tags (if provided)
+            face_tags: New face recognition tags (if provided, auto-synced from faces)
             is_favorite: New favorite status (if provided)
             faces: New face data (if provided)
             image_base64: New image data (if provided)
@@ -440,6 +497,13 @@ class PhotoDatabase:
             update_expr_parts.append('#faces = :faces')
             expr_attr_names['#faces'] = 'faces'
             expr_attr_values[':faces'] = json.dumps(faces)
+            # Auto-sync face_tags when faces are updated
+            face_tags = self._extract_face_tags(faces)
+
+        if face_tags is not None:
+            update_expr_parts.append('#face_tags = :face_tags')
+            expr_attr_names['#face_tags'] = 'face_tags'
+            expr_attr_values[':face_tags'] = face_tags
 
         if image_base64 is not None:
             # Upload new image to S3
