@@ -1,12 +1,17 @@
-# Photo Storage App v2.0
+# Photo Storage App v2.1
 
 A feature-rich photo storage application built with Python and Streamlit, featuring advanced edge detection, interactive crop refinement, facial recognition, and cloud storage support.
 
-## What's New in v2.0
+## What's New in v2.1
+
+### Universal Photo Format Support
+- **Any aspect ratio**: Now detects photo strips, panoramas, square photos, and non-standard formats
+- **Rectangularity scoring**: Uses geometric angle analysis (90° corners) instead of preset ratios
+- **Better photo strip detection**: Significantly improved detection for tall/narrow photo booth strips
 
 ### Advanced Edge Detection
 - **Multi-method boundary detection**: Uses 6 different algorithms (Canny, adaptive threshold, color segmentation, saturation-based, Sobel+Laplacian, GrabCut) for robust photo detection
-- **Smart scoring**: Automatically selects the best detected boundary based on photo-likeness metrics
+- **Smart scoring**: Automatically selects the best detected boundary based on geometric quality metrics
 - **Works on varied backgrounds**: Handles wood, fabric, colored surfaces, and more
 
 ### Interactive Crop Refinement
@@ -147,36 +152,42 @@ When "Review & adjust crops" is enabled:
 photobooth-archive/
 ├── app.py                      # Main Streamlit application
 ├── database.py                 # DynamoDB + S3 integration
-├── image_processing.py         # Image processing utilities
+├── image_processing.py         # Image processing utilities (auto-crop, orientation)
 ├── face_recognition_module.py  # Face detection and recognition
 ├── crop_editor.py              # Interactive crop editor component
-├── scanner/                    # Edge detection module
-│   ├── __init__.py
-│   ├── detector.py             # Multi-method boundary detection
-│   └── transformer.py          # Perspective transformation
+├── scanner/                    # Photo boundary detection module
+│   ├── __init__.py             # Exports EdgeDetector, PerspectiveTransformer
+│   ├── detector.py             # Multi-method boundary detection (6 algorithms)
+│   └── transformer.py          # Perspective correction transformation
 ├── requirements.txt            # Python dependencies
+├── .streamlit/                 # Streamlit configuration
+├── raw/                        # Sample raw photos (for testing)
+├── processed/                  # Sample processed photos (for testing)
 └── README.md                   # This file
 ```
 
 ## How Auto-Crop Works
 
-The v2 edge detection uses multiple strategies:
+The edge detection uses multiple strategies to find photo boundaries:
 
-1. **Multi-threshold Canny**: Edge detection at various sensitivity levels
+### Detection Methods
+1. **Multi-threshold Canny**: Edge detection at various sensitivity levels (20-200)
 2. **Adaptive Threshold**: Local threshold adaptation for uneven lighting
 3. **Color Segmentation**: LAB color space background differentiation
 4. **Saturation Detection**: Photos typically more colorful than backgrounds
 5. **Combined Edges**: Sobel + Laplacian edge combination
 6. **GrabCut**: Foreground/background segmentation
 
+### Scoring Algorithm
 Each method produces candidate boundaries, which are scored on:
-- Area ratio (prefer medium-sized regions)
-- Convexity (prefer convex shapes)
-- Aspect ratio (prefer common photo ratios: 4x6, 5x7, etc.)
-- Angle alignment (prefer axis-aligned rectangles)
-- Edge proximity (penalize shapes touching image borders)
+- **Area ratio** (30%): Prefer contours that are 15-75% of image area
+- **Rectangularity** (30%): How close corners are to 90° angles
+- **Convexity** (25%): Prefer convex shapes
+- **Edge proximity** (15%): Penalize shapes touching image borders
 
-The highest-scoring boundary is selected and can be manually refined.
+**Note**: Unlike v2.0, there are no preset aspect ratios. The detector now works with any photo format - standard prints, photo strips, panoramas, squares, or any custom size.
+
+The highest-scoring boundary is selected and can be manually refined in the crop editor.
 
 ## AWS Setup
 
@@ -268,6 +279,13 @@ s3_bucket = "your-bucket"
 MIT License - feel free to modify and use as needed!
 
 ## Changelog
+
+### v2.1
+- **Removed aspect ratio constraints**: Now detects any photo format (strips, panoramas, etc.)
+- **Added rectangularity scoring**: Measures corner angles instead of matching preset ratios
+- **Improved photo strip detection**: Better handling of tall/narrow formats
+- **Updated scoring weights**: Rebalanced for geometric quality over format matching
+- **Refined contour shrinking**: Tighter crops with 2% margin adjustment
 
 ### v2.0
 - Added multi-method edge detection (6 algorithms)

@@ -10,19 +10,8 @@ class EdgeDetector:
 
     Combines Canny edge detection with adaptive thresholding, color
     segmentation, and morphological operations for robust detection
-    across varied backgrounds.
+    across varied backgrounds. Supports any aspect ratio.
     """
-
-    # Typical photo aspect ratios (width/height)
-    PHOTO_ASPECT_RATIOS = [
-        (4, 6),   # 4x6
-        (5, 7),   # 5x7
-        (3, 5),   # 3x5
-        (8, 10),  # 8x10
-        (3, 4),   # 3x4 (standard)
-        (2, 3),   # 2x3
-        (1, 1),   # Square
-    ]
 
     def __init__(
         self,
@@ -107,7 +96,7 @@ class EdgeDetector:
 
         # Apply inward margin to tighten the crop
         if best_contour is not None:
-            best_contour = self._shrink_contour(best_contour, image.shape, margin_percent=0.03)
+            best_contour = self._shrink_contour(best_contour, image.shape, margin_percent=0.02)
 
         return best_contour
 
@@ -297,7 +286,7 @@ class EdgeDetector:
 
     def _shrink_contour(
         self, contour: np.ndarray, image_shape: Tuple[int, int],
-        margin_percent: float = 0.01
+        margin_percent: float = 0.02
     ) -> np.ndarray:
         """Shrink contour inward by a margin to tighten the crop."""
         points = contour.astype(np.float32)
@@ -348,7 +337,7 @@ class EdgeDetector:
             epsilon = self.contour_epsilon * perimeter
 
             # Try different epsilon values
-            for eps_mult in [0.5, 1.0, 1.5, 2.0]:
+            for eps_mult in [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]:
                 approx = cv2.approxPolyDP(contour, epsilon * eps_mult, True)
 
                 if len(approx) == 4:
@@ -370,48 +359,103 @@ class EdgeDetector:
         candidates.sort(key=lambda x: x[0], reverse=True)
         return candidates[0][1].astype(np.float32)
 
+    def _compute_angle(self, p1: np.ndarray, vertex: np.ndarray, p2: np.ndarray) -> float:
+        """Compute angle at vertex between p1-vertex-p2."""
+        v1 = p1 - vertex
+        v2 = p2 - vertex
+
+        dot = np.dot(v1, v2)
+        mag1 = np.linalg.norm(v1)
+        mag2 = np.linalg.norm(v2)
+
+        if mag1 == 0 or mag2 == 0:
+            return 0
+
+        cos_angle = dot / (mag1 * mag2)
+        cos_angle = np.clip(cos_angle, -1, 1)
+        angle = np.arccos(cos_angle)
+
+        return np.degrees(angle)
+
+    def _rectangularity_score(self, points: np.ndarray) -> float:
+        """Score how close the quadrilateral is to a rectangle (90 degree angles)."""
+        # Order points consistently
+        pts = self._order_points(points)
+
+        # Compute angles at each corner
+        angles = []
+        for i in range(4):
+            p1 = pts[(i - 1) % 4]
+            vertex = pts[i]
+            p2 = pts[(i + 1) % 4]
+            angle = self._compute_angle(p1, vertex, p2)
+            angles.append(angle)
+
+        # Perfect rectangle has all 90 degree angles
+        # Score based on how close angles are to 90 degrees
+        angle_errors = [abs(a - 90) for a in angles]
+        avg_error = sum(angle_errors) / 4
+
+        # Score: 1.0 for perfect rectangle, decreases with error
+        # Allow up to 30 degree deviation before score drops significantly
+        score = max(0, 1 - avg_error / 45)
+
+        return score
+
+    def _order_points(self, pts: np.ndarray) -> np.ndarray:
+        """Order points: top-left, top-right, bottom-right, bottom-left."""
+        pts = pts.astype(np.float32).reshape(4, 2)
+        ordered = np.zeros((4, 2), dtype=np.float32)
+
+        s = pts.sum(axis=1)
+        ordered[0] = pts[np.argmin(s)]
+        ordered[2] = pts[np.argmax(s)]
+
+        d = np.diff(pts, axis=1).flatten()
+        ordered[1] = pts[np.argmin(d)]
+        ordered[3] = pts[np.argmax(d)]
+
+        return ordered
+
     def _score_quadrilateral(
         self, quad: np.ndarray, image_area: float,
         image_shape: Tuple[int, int] = None
     ) -> float:
-        """Score a quadrilateral based on photo-likeness."""
+        """Score a quadrilateral based on geometric quality."""
         points = quad.reshape(4, 2)
         area = cv2.contourArea(points)
 
+        if area <= 0:
+            return 0
+
         # Penalize very large contours (likely whole image)
         area_ratio = area / image_area
-        if area_ratio > 0.9:
-            return 0.1  # Very low score for near-full-image contours
+        if area_ratio > 0.92:
+            return 0.05  # Very low score for near-full-image contours
 
-        # Prefer medium-sized contours (10-70% of image)
-        if 0.1 <= area_ratio <= 0.7:
-            area_score = 0.8 + (0.2 * (1 - abs(area_ratio - 0.4) / 0.3))
+        # Area score: prefer contours that are 15-75% of image
+        if 0.15 <= area_ratio <= 0.75:
+            area_score = 0.9
+        elif 0.08 <= area_ratio < 0.15:
+            area_score = 0.5 + (area_ratio - 0.08) / 0.07 * 0.4
+        elif 0.75 < area_ratio <= 0.92:
+            area_score = 0.9 - (area_ratio - 0.75) / 0.17 * 0.7
         else:
-            area_score = area_ratio * 0.5
+            area_score = 0.3
 
-        # Convexity score
+        # Convexity score - should be convex or nearly convex
         hull = cv2.convexHull(points)
         hull_area = cv2.contourArea(hull)
         convexity = area / hull_area if hull_area > 0 else 0
 
-        # Aspect ratio score (prefer photo-like ratios)
-        rect = cv2.minAreaRect(points)
-        w, h = rect[1]
-        if w == 0 or h == 0:
-            return 0
-
-        aspect = max(w, h) / min(w, h)
-        aspect_score = self._aspect_ratio_score(aspect)
-
-        # Angle score (prefer roughly aligned rectangles)
-        angle = rect[2]
-        angle_score = 1.0 - min(abs(angle), abs(90 - abs(angle))) / 45
+        # Rectangularity score - angles should be close to 90 degrees
+        rectangularity = self._rectangularity_score(points)
 
         # Edge proximity penalty - penalize contours touching image edges
         edge_penalty = 1.0
         if image_shape is not None:
             h_img, w_img = image_shape[:2]
-            margin = 0.02  # 2% margin
+            margin = 0.015  # 1.5% margin
             min_x, min_y = points.min(axis=0)
             max_x, max_y = points.max(axis=0)
 
@@ -422,28 +466,17 @@ class EdgeDetector:
                 max_y > h_img * (1 - margin)
             )
             if touches_edge:
-                edge_penalty = 0.5  # Significant penalty for edge-touching
+                edge_penalty = 0.4
 
-        # Combined score
+        # Combined score - no aspect ratio constraint
         score = (
-            area_score * 0.25 +
+            area_score * 0.30 +
             convexity * 0.25 +
-            aspect_score * 0.25 +
-            angle_score * 0.1 +
+            rectangularity * 0.30 +
             edge_penalty * 0.15
         )
 
         return score
-
-    def _aspect_ratio_score(self, aspect: float) -> float:
-        """Score aspect ratio based on common photo sizes."""
-        best_score = 0
-        for w, h in self.PHOTO_ASPECT_RATIOS:
-            target = max(w, h) / min(w, h)
-            diff = abs(aspect - target)
-            score = max(0, 1 - diff / 0.5)
-            best_score = max(best_score, score)
-        return best_score
 
     def _select_best_contour(
         self,
