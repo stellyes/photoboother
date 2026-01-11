@@ -718,7 +718,7 @@ def gallery_view(photos: List[Dict[str, Any]], key_suffix: str = ""):
                         st.caption(" ".join([f"`{t}`" for t in tags[:3]]))
                     
                     # View button
-                    if st.button("View", key=f"view_{photo['photo_id']}"):
+                    if st.button("View", key=f"view_{photo['photo_id']}_{key_suffix}"):
                         st.session_state.selected_photo = photo['photo_id']
                         st.session_state.view_mode = 'detail'
                         st.rerun()
