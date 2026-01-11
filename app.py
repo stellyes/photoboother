@@ -673,14 +673,14 @@ def save_staged_photos(staged_photos: List[Dict[str, Any]]):
             st.error(f"Error saving {staged['filename']}: {str(e)}")
 
 
-def gallery_view(photos: List[Dict[str, Any]]):
+def gallery_view(photos: List[Dict[str, Any]], key_suffix: str = ""):
     """Display photos in a gallery grid."""
     if not photos:
         st.info("No photos to display. Upload some photos to get started!")
         return
-    
+
     # Number of columns
-    cols_per_row = st.slider("Columns", 2, 6, 4, key="gallery_cols")
+    cols_per_row = st.slider("Columns", 2, 6, 4, key=f"gallery_cols_{key_suffix}")
     
     # Create grid
     for i in range(0, len(photos), cols_per_row):
@@ -926,7 +926,7 @@ def favorites_view():
         return
     
     st.subheader(f"⭐ Favorites ({len(favorites)})")
-    gallery_view(favorites)
+    gallery_view(favorites, key_suffix="favorites")
 
 
 def search_view():
@@ -992,7 +992,7 @@ def search_view():
 
     st.write(f"Showing {len(filtered_photos)} of {len(st.session_state.photos)} photos")
 
-    gallery_view(filtered_photos)
+    gallery_view(filtered_photos, key_suffix="search")
 
 
 def get_all_tags() -> List[str]:
@@ -1114,7 +1114,7 @@ def main():
         upload_section()
     
     with tab2:
-        gallery_view(st.session_state.photos)
+        gallery_view(st.session_state.photos, key_suffix="gallery")
     
     with tab3:
         favorites_view()
